@@ -1,3 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+'data/raw/*.geojson' filter=lfs diff=lfs merge=lfs -text
+'data/processed/masks/*.tif' filter=lfs diff=lfs merge=lfs -text
+'data/processed/masks/*.tiff' filter=lfs diff=lfs merge=lfs -text
+'*.pth' filter=lfs diff=lfs merge=lfs -text
+'*.h5' filter=lfs diff=lfs merge=lfs -text
 data/raw/ARTS_main_dataset_v.3.1.0.geojson filter=lfs diff=lfs merge=lfs -text
