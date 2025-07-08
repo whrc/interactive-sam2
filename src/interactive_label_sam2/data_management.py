@@ -1,12 +1,13 @@
-# src/rts_labeling_tool/data_management.py
+# src/interactive_label_sam2/data_management.py
 
 import geopandas as gpd
 import json
 import sys
 from pathlib import Path
 from shapely.geometry import Point
+from typing import Union, List, Tuple
 
-def load_and_filter_arts_data(geojson_path: Path) -> gpd.GeoDataFrame | None:
+def load_and_filter_arts_data(geojson_path: Path) -> Union[gpd.GeoDataFrame, None]:
     """
     Loads the ARTS GeoJSON dataset, validates it, and filters for features
     marked as 'Positive'.
@@ -15,8 +16,8 @@ def load_and_filter_arts_data(geojson_path: Path) -> gpd.GeoDataFrame | None:
         geojson_path (Path): The full path to the GeoJSON file.
 
     Returns:
-        gpd.GeoDataFrame | None: A GeoDataFrame containing only the 'Positive'
-                                 class features, or None if an error occurs.
+        Union[gpd.GeoDataFrame, None]: A GeoDataFrame containing only the 'Positive'
+                                       class features, or None if an error occurs.
     """
     # --- 1. Validate File Existence ---
     if not geojson_path.exists():
@@ -27,7 +28,8 @@ def load_and_filter_arts_data(geojson_path: Path) -> gpd.GeoDataFrame | None:
     try:
         with open(geojson_path, 'r', encoding='utf-8') as f:
             json.load(f)
-        print("File successfully validated as a JSON.")
+        # This print statement can be removed in production if too verbose
+        # print("File successfully validated as a JSON.")
     except json.JSONDecodeError as e:
         print(f"\nFATAL ERROR: The file is not a valid JSON. Error: {e}", file=sys.stderr)
         return None
@@ -38,15 +40,15 @@ def load_and_filter_arts_data(geojson_path: Path) -> gpd.GeoDataFrame | None:
     # --- 3. Load with GeoPandas and Filter ---
     try:
         gdf = gpd.read_file(geojson_path, engine="pyogrio")
-        print("GeoJSON file loaded successfully with GeoPandas.")
+        # print("GeoJSON file loaded successfully with GeoPandas.")
 
         if 'TrainClass' not in gdf.columns:
             print("Error: 'TrainClass' column not found.", file=sys.stderr)
             return None
         
-        print(f"Total polygons found in file: {len(gdf)}")
+        # print(f"Total polygons found in file: {len(gdf)}")
         gdf_positive = gdf[gdf['TrainClass'] == 'Positive'].copy()
-        print(f"Found {len(gdf_positive)} polygons marked as 'Positive'.")
+        # print(f"Found {len(gdf_positive)} polygons marked as 'Positive'.")
         
         return gdf_positive
 
@@ -54,7 +56,7 @@ def load_and_filter_arts_data(geojson_path: Path) -> gpd.GeoDataFrame | None:
         print(f"\nAn unexpected error occurred during GeoPandas processing: {e}", file=sys.stderr)
         return None
 
-def get_feature_info(uid: str, gdf: gpd.GeoDataFrame) -> tuple[list[gpd.GeoSeries], Point] | None:
+def get_feature_info(uid: str, gdf: gpd.GeoDataFrame) -> Union[Tuple[List[gpd.GeoSeries], Point], None]:
     """
     Finds all polygons for a given UID and calculates their combined centroid.
 
@@ -66,10 +68,10 @@ def get_feature_info(uid: str, gdf: gpd.GeoDataFrame) -> tuple[list[gpd.GeoSerie
         gdf (gpd.GeoDataFrame): The GeoDataFrame containing all positive features.
 
     Returns:
-        tuple | None: A tuple containing:
-                      - A list of historical polygon geometries.
-                      - The calculated centroid (Shapely Point).
-                      Returns None if the UID is not found.
+        Union[Tuple, None]: A tuple containing:
+                            - A list of historical polygon geometries.
+                            - The calculated centroid (Shapely Point).
+                            Returns None if the UID is not found.
     """
     # Filter the dataframe to get all entries for the specified UID
     feature_gdf = gdf[gdf['UID'] == uid]
