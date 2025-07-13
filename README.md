@@ -24,7 +24,7 @@ This is the primary method for using the tool. **No local installation is requir
 
 1.  **Open the Notebook in Colab**
     * Click the following link to open the main application notebook directly in Google Colab:
-        [Open in Colab](https://colab.research.google.com/github/whrc/interactive-sam2/blob/main/notebooks/interactive_label_sam2_(v1_0).ipynb)
+        [Open in Colab](https://colab.research.google.com/github/whrc/interactive-sam2/blob/main/notebooks/interactive_label_sam2.ipynb)
     * If the link doesn't work, go to `File > Open notebook` in Colab, select the "GitHub" tab, enter the repository URL (`https://github.com/whrc/interactive-sam2`), and open `notebooks/interactive_label_sam2.ipynb`.
 
 2.  **Run the Setup Cells**
