@@ -11,9 +11,6 @@
 #
 # # Ensure you have the project repository cloned
 # # git clone https://github.com/whrc/interactive-sam2.git
-# # cd interactive-sam2
-# # git lfs pull
-# # cd ..
 #
 # ==============================================================================
 #
@@ -30,6 +27,7 @@ import geopandas as gpd
 import rasterio
 from ipycanvas import Canvas, hold_canvas
 import importlib
+import time
 
 # ### --- Section 2: Environment-Specific Setup (Colab) --- ###
 IS_COLAB = 'google.colab' in sys.modules
@@ -48,7 +46,6 @@ else:
     print("Non-Colab environment detected. Skipping Colab-specific setup.")
 
 # ### --- Section 3: Add Source Code to Python Path and Import --- ###
-# This assumes the script is run from the directory containing 'interactive-sam2'
 project_root = Path(".")
 src_path = project_root / "src"
 if str(src_path) not in sys.path:
@@ -58,15 +55,14 @@ try:
     from interactive_label_sam2.model import SAM2Model
     from interactive_label_sam2.gcs_utils import GCSImageLoader, load_correspondence_data, get_image_info_for_uid
     from interactive_label_sam2.data_management import load_and_filter_arts_data
-    print(" Custom modules imported successfully.")
+    print("Custom modules imported successfully.")
 except ImportError as e:
-    print(f" FATAL: Could not import custom modules. Ensure the 'interactive-sam2/src' directory is correct. Error: {e}")
-    # Exit if modules can't be found
+    print(f"FATAL: Could not import custom modules. Ensure the 'interactive-sam2/src' directory is correct. Error: {e}")
     sys.exit(1)
 
 
 # ### --- Section 4: Application State and Global Constants --- ###
-print("\\n--- Defining Application State and UI Components ---")
+print("\n--- Defining Application State and UI Components ---")
 DRIVE_ROOT = Path("/content/drive/MyDrive/Interactive_sam") if IS_COLAB else Path("./data_output")
 OUTPUT_DIR = DRIVE_ROOT / "test"
 MANIFEST_PATH = OUTPUT_DIR / "rts_labeling_manifest.csv"
@@ -80,6 +76,7 @@ APP_STATE = {
     "box_prompts": [],
     "final_boxes": [],
     "mask_visible": True,
+    "session_skipped_uids": [], # List to track skipped UIDs in this session
     "canvas": None
 }
 
@@ -87,6 +84,7 @@ APP_STATE = {
 worker_id_input = widgets.Text(value='worker_01', description='Worker ID:', layout=widgets.Layout(width='300px'))
 start_button = widgets.Button(description="Start Labeling Session", button_style='success')
 next_uid_button = widgets.Button(description="Get Next Unprocessed RTS", icon='forward', layout=widgets.Layout(width='250px'))
+skip_button = widgets.Button(description="Skip for Now", icon='fast-forward', button_style='info', layout=widgets.Layout(width='250px'))
 uid_display = widgets.HTML(value="<h3>Current UID: None</h3>")
 prompt_toggle = widgets.ToggleButtons(options=['Positive', 'Negative', 'Box'], description='Prompt Type:', button_style='info')
 run_sam_button = widgets.Button(description="Generate Mask", icon='magic', button_style='primary')
@@ -97,11 +95,12 @@ reject_bad_image_button = widgets.Button(description="Reject (Bad Image)", icon=
 reject_no_feature_button = widgets.Button(description="Reject (No Feature)", icon='ban', button_style='warning')
 
 # ### --- Section 6: UI Layout --- ###
+navigation_controls = widgets.HBox([next_uid_button, skip_button])
 controls_col1 = widgets.VBox([uid_display, prompt_toggle])
 controls_col2 = widgets.VBox([run_sam_button, clear_prompts_button, toggle_mask_visibility])
 prompting_controls = widgets.HBox([controls_col1, controls_col2])
 finalization_controls = widgets.HBox([save_button, reject_bad_image_button, reject_no_feature_button])
-main_controls = widgets.VBox([next_uid_button, prompting_controls, finalization_controls])
+main_controls = widgets.VBox([navigation_controls, prompting_controls, finalization_controls])
 login_ui = widgets.VBox([worker_id_input, start_button])
 main_app_ui = widgets.VBox([main_controls])
 
@@ -199,11 +198,44 @@ def on_toggle_mask_visibility_changed(change):
         mask=APP_STATE.get("current_mask")
     )
 
+def on_skip_button_clicked(b):
+    """Skips the current UID, reverting its status and loading the next one."""
+    current_uid = APP_STATE.get("current_uid")
+    if not current_uid:
+        print("No UID is currently loaded. Click 'Get Next' to start.")
+        return
+
+    print(f"Skipping UID {current_uid}. Reverting its status to 'unprocessed'.")
+    manifest_df = APP_STATE["manifest_df"]
+    
+    # Add the UID to the list of items skipped in this session
+    APP_STATE["session_skipped_uids"].append(current_uid)
+    
+    uid_index = manifest_df.index[manifest_df['uid'] == current_uid]
+    if not uid_index.empty:
+        manifest_df.loc[uid_index, 'labeling_status'] = 'unprocessed'
+        manifest_df.loc[uid_index, 'worker_id'] = np.nan
+        manifest_df.loc[uid_index, 'start_time_utc'] = np.nan
+        manifest_df.loc[uid_index, 'end_time_utc'] = np.nan
+        manifest_df.loc[uid_index, 'output_filename'] = np.nan
+        
+        manifest_df.to_csv(MANIFEST_PATH, index=False)
+        print("Manifest updated.")
+
+    # Load the next UID, which will automatically ignore the session-skipped list
+    load_next_uid()
+
 def finalize_labeling(status: str):
     """Finalizes the current UID with a given status, saves files, and loads the next UID."""
     uid = APP_STATE.get("current_uid")
     if not uid: return
     print(f"Finalizing UID {uid} with status: {status}")
+    manifest_df = APP_STATE["manifest_df"]
+    uid_index = manifest_df.index[manifest_df['uid'] == uid]
+
+    if uid_index.empty:
+        print(f"Error: Could not find UID {uid} in manifest to finalize.", file=sys.stderr)
+        return
 
     if status == 'completed':
         if APP_STATE.get("current_mask") is None:
@@ -219,28 +251,29 @@ def finalize_labeling(status: str):
         print(f"Saving 4-channel GeoTIFF to: {output_path}")
         with rasterio.open(output_path, 'w', **profile) as dst:
             dst.write(output_array.astype(rasterio.uint8))
-        APP_STATE["manifest_df"].loc[APP_STATE["manifest_df"]['uid'] == uid, 'output_filename'] = output_filename
+        manifest_df.loc[uid_index, 'output_filename'] = output_filename
     else:
-        APP_STATE["manifest_df"].loc[APP_STATE["manifest_df"]['uid'] == uid, 'output_filename'] = ''
+        manifest_df.loc[uid_index, 'output_filename'] = np.nan
 
-    APP_STATE["manifest_df"].loc[APP_STATE["manifest_df"]['uid'] == uid, 'labeling_status'] = status
-    APP_STATE["manifest_df"].loc[APP_STATE["manifest_df"]['uid'] == uid, 'end_time_utc'] = datetime.datetime.utcnow().isoformat()
-    APP_STATE["manifest_df"].to_csv(MANIFEST_PATH, index=False)
+    manifest_df.loc[uid_index, 'labeling_status'] = status
+    manifest_df.loc[uid_index, 'end_time_utc'] = datetime.datetime.utcnow().isoformat()
+    manifest_df.to_csv(MANIFEST_PATH, index=False)
     print("Manifest updated. Loading next UID...")
     load_next_uid()
 
 def load_next_uid():
-    """Loads the next unprocessed UID from the manifest and displays the corresponding image."""
-    # Check for fatal initialization error before proceeding
+    """
+    Loads the next unprocessed UID from the manifest and displays the corresponding image.
+    Ignores UIDs that have been skipped in the current session.
+    """
     if APP_STATE.get("arts_gdf") is None or APP_STATE.get("correspondence_gdf") is None:
-        print(" Cannot load next UID. Application did not initialize correctly due to missing data files.", file=sys.stderr)
+        print("Cannot load next UID. Application did not initialize correctly due to missing data files.", file=sys.stderr)
         return
         
     on_clear_prompts_button_clicked(None)
     manifest_df = APP_STATE["manifest_df"]
     worker_id = APP_STATE["worker_id"]
     
-    # First, check if this worker has an 'in_progress' item
     worker_in_progress = manifest_df[(manifest_df['labeling_status'] == 'in_progress') & (manifest_df['worker_id'] == worker_id)]
     
     next_uid = None
@@ -248,10 +281,21 @@ def load_next_uid():
         next_uid = worker_in_progress.iloc[0]['uid']
     else:
         unprocessed_series = manifest_df[manifest_df['labeling_status'] == 'unprocessed']
+        
+        # Exclude all UIDs skipped in this session
+        session_skipped = APP_STATE.get("session_skipped_uids", [])
+        if session_skipped:
+            unprocessed_series = unprocessed_series[~unprocessed_series['uid'].isin(session_skipped)]
+            
         if not unprocessed_series.empty:
             next_uid = unprocessed_series.iloc[0]['uid']
         else:
-            uid_display.value = "<h3>All UIDs Processed!</h3>"; redraw_canvas(); return
+            if session_skipped:
+                 uid_display.value = "<h3>All other UIDs processed!</h3><p>Restart session to see skipped items again.</p>"
+            else:
+                 uid_display.value = "<h3>All UIDs Processed!</h3>"
+            redraw_canvas()
+            return
 
     feature_polygons = APP_STATE["arts_gdf"][APP_STATE["arts_gdf"]['UID'] == next_uid]
     if feature_polygons.empty:
@@ -281,7 +325,6 @@ def load_next_uid():
     manifest_df.loc[manifest_df['uid'] == next_uid, 'labeling_status'] = 'in_progress'
     manifest_df.loc[manifest_df['uid'] == next_uid, 'worker_id'] = worker_id
     manifest_df.loc[manifest_df['uid'] == next_uid, 'start_time_utc'] = datetime.datetime.utcnow().isoformat()
-    # Save manifest immediately after claiming a UID
     manifest_df.to_csv(MANIFEST_PATH, index=False)
 
     image_array, profile = tile_data
@@ -290,7 +333,7 @@ def load_next_uid():
 
     rgb_array = image_array[:3]
     if np.max(rgb_array) > 0:
-        p2, p98 = np.percentile(rgb_array[rgb_array > 0], (2, 98)) # Avoid including no-data values in percentile
+        p2, p98 = np.percentile(rgb_array[rgb_array > 0], (2, 98))
         rgb_stretched = np.clip((rgb_array - p2) * 255.0 / (p98 - p2), 0, 255).astype(np.uint8)
     else:
         rgb_stretched = np.zeros_like(rgb_array, dtype=np.uint8)
@@ -299,14 +342,22 @@ def load_next_uid():
     rgba_display = np.dstack((rgb_display, np.full((rgb_display.shape[0], rgb_display.shape[1]), 255, dtype=np.uint8)))
 
     APP_STATE["current_display_image"] = rgba_display
-    APP_STATE["canvas"].width = rgba_display.shape[1]
-    APP_STATE["canvas"].height = rgba_display.shape[0]
+    
+    # Resize canvas and add a small delay to ensure UI updates before drawing
+    new_width, new_height = rgba_display.shape[1], rgba_display.shape[0]
+    print(f"Resizing canvas to: {new_width} W x {new_height} H")
+    APP_STATE["canvas"].width = new_width
+    APP_STATE["canvas"].height = new_height
+    time.sleep(0.1) 
+    
     redraw_canvas(image_to_show=rgba_display)
 
 def initialize_app():
     """Initializes all backend components of the application."""
     print("--- Initializing Application... ---")
     APP_STATE["worker_id"] = worker_id_input.value
+    # Reset session-specific state on new initialization
+    APP_STATE["session_skipped_uids"] = []
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"Output directory set to: {OUTPUT_DIR}")
@@ -319,30 +370,29 @@ def initialize_app():
             shutil.copy(repo_manifest, MANIFEST_PATH)
             print("Manifest copied successfully.")
         else:
-            print(f" FATAL: Could not find manifest.csv in the repository at {repo_manifest}", file=sys.stderr)
+            print(f"FATAL: Could not find manifest.csv in the repository at {repo_manifest}", file=sys.stderr)
             return
 
     print(f"Loading manifest from: {MANIFEST_PATH}")
     APP_STATE["manifest_df"] = pd.read_csv(MANIFEST_PATH)
     print("Manifest loaded.")
 
-    # --- Robust Data Loading ---
     correspondence_path = project_root / "data" / "raw" / "planet_basemaps_rts_polygon_basemap_correspondence.geojson"
     APP_STATE["correspondence_gdf"] = load_correspondence_data(correspondence_path)
     if APP_STATE["correspondence_gdf"] is None:
-        print(f" FATAL: Failed to load correspondence data from {correspondence_path}. Cannot continue.", file=sys.stderr)
-        return # Stop initialization
+        print(f"FATAL: Failed to load correspondence data from {correspondence_path}. Cannot continue.", file=sys.stderr)
+        return
 
     arts_path = project_root / "data" / "raw" / "ARTS_main_dataset_v.3.1.0.geojson"
     APP_STATE["arts_gdf"] = load_and_filter_arts_data(arts_path)
     if APP_STATE["arts_gdf"] is None:
-        print(f" FATAL: Failed to load ARTS data from {arts_path}. Cannot continue.", file=sys.stderr)
-        return # Stop initialization
+        print(f"FATAL: Failed to load ARTS data from {arts_path}. Cannot continue.", file=sys.stderr)
+        return
 
     APP_STATE["gcs_loader"] = GCSImageLoader(project_id="abruptthawmapping", bucket_name="abrupt_thaw", search_prefix="planet_basemaps/global_quarterly_COGs")
     APP_STATE["sam_model"] = SAM2Model(model_name="facebook/sam-vit-base")
 
-    print(f"\\n Initialization complete. Welcome, {APP_STATE['worker_id']}!")
+    print(f"\nInitialization complete. Welcome, {APP_STATE['worker_id']}!")
     print("Click 'Get Next Unprocessed RTS' to begin.")
 
 def on_start_button_clicked(b):
@@ -364,6 +414,7 @@ def main():
     """Main function to wire up UI components and display the login screen."""
     start_button.on_click(on_start_button_clicked)
     next_uid_button.on_click(lambda b: load_next_uid())
+    skip_button.on_click(on_skip_button_clicked)
     run_sam_button.on_click(on_run_sam_button_clicked)
     clear_prompts_button.on_click(on_clear_prompts_button_clicked)
     toggle_mask_visibility.observe(on_toggle_mask_visibility_changed, names='value')
@@ -371,7 +422,7 @@ def main():
     reject_bad_image_button.on_click(lambda b: finalize_labeling('rejected_bad_imagery'))
     reject_no_feature_button.on_click(lambda b: finalize_labeling('rejected_no_feature'))
 
-    print("\\n--- Displaying User Interface ---")
+    print("\n--- Displaying User Interface ---")
     display(login_ui)
 
 if __name__ == "__main__":
