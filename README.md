@@ -1,4 +1,5 @@
-# Interactive Geospatial Labeling Tool for RTS
+# Interactive Geospatial Labelling Tool for RTS
+![Alt Text](https://github.com/whrc/interactive-sam2/blob/main/thumb.gif)
 
 ## 1. Introduction
 
